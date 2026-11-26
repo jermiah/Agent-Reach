@@ -1,10 +1,76 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+## Fork sync — 2026-11-26
 
----
+- Merge 162 upstream commits through `8d9ecc1` (version 1.6.1), including the unified CLI, dedicated browser, session lifecycle, and recent platform/security fixes.
+- Keep English documentation, skills, channel descriptions, and installation reports.
+- Install and update from `jermiah/Agent-Reach:main`; this fork does not require GitHub release assets. Version checks track the fork, not the original repository.
+- Adopt upstream removal of obsolete 1.5 modules and localized README copies.
 
-## [Unreleased]
+## [1.6.1] - 2026-11-01
+
+
+- Several 1.6.0 cases where web search, Reddit, Xiaohongshu or Bilibili failed although the content was reachable, or reported success with empty content, are fixed.
+- When another program on your computer uses the browser port, Agent Reach can use a different one; you don't have to close that program.
+- A login copy that fails now says so instead of reporting success.
+- On Windows, Xiaohongshu links with special characters open correctly.
+
+### Technical details
+- Web search: every request identifies itself as `agent-reach/<version>`, so Exa's Cloudflare front no longer blocks it (#877).
+- Reddit: when the site tool fails transiently (for example it returns HTML instead of data), search and read fall back to the public web (#880).
+- Xiaohongshu: OpenCLI 2.0 results are mapped, so read no longer succeeds with empty fields; search and comments no longer return one empty row when there are no results (#861, #895).
+- Bilibili: a QR login that saved no usable credential is no longer reported as success, and the hint now says `agent-reach login bilibili` (#866, #883).
+- The dedicated browser's port is configurable with `agent-reach configure browser-port <port>`, for when another tool holds 9222 (#848).
+- Login reuse: no "copied 0 cookies" record when the browser bridge is down; an explicit `login <channel> --import-existing` that copies nothing now fails clearly (#879).
+- Windows: Xiaohongshu note links containing `&` can be read and their comments loaded (#860).
+
+
+
+## [1.6.0] - 2026-10-23
+
+
+- Upgrading from an older version: just send your AI the "update Agent Reach" sentence. Your keys and settings are kept, and the old program is removed for you.
+- Adding a platform takes one sentence. Everything it needs is installed for you, with no admin password; you only log in or enter a key.
+- Platforms that need a login, such as Xiaohongshu and X, now use Agent Reach's own browser in the background, never yours, and several AIs can search at once.
+- RSS and Exa search are now part of "web". When a new version is out, your AI tells you in plain words what changed and updates only if you say yes.
+
+1.6 is a rebuild. Agents call one command, `agent-reach`; everything Agent Reach installs or stores lives under `~/.agent-reach/`.
+
+### Technical details
+- 28 of 40 actions passed real acceptance before release; these shipped untested with maintainer approval: Reddit (test network blocked), Instagram (rate limited), Bilibili subtitles, LinkedIn, Xueqiu hot posts/stocks (no login), Xiaoyuzhou (no key).
+- Browser channels share one profile, close after ten idle minutes and reopen on demand.
+- Adding a channel prepares its tools; removal clears only that site's login. Default platforms can be removed and updates won't add them back.
+- Updating keeps tools that have a tested version at that version; other tools get the newest version inside their supported range.
+- Public content remains public-first, with a compact capability receipt.
+- Keep Xiaoyuzhou transcription; remove the extra planner and duplicate site extraction.
+- Reuse existing local site sessions read-only; queries default to headless, with a visible window for human login.
+- The dedicated browser is identified by the id its extension saves inside its own profile, so the user's own Chrome is never mistaken for it; a query no longer closes an open login window.
+- Browser channels run queries in parallel: up to 2 per platform and 4 in total, with the rest queued instead of failing BUSY at once; login windows, logout and browser setup wait for running queries.
+- Report NEED_LOGIN instead of UPSTREAM_BROKEN when not logged in: Xueqiu community (error 400016), Bilibili subtitles (no Bilibili login), LinkedIn (no LinkedIn login in the dedicated browser).
+- Smoother upgrade from 1.5: install and update share one guide, install.md, which checks the version first (update.md, where 1.5 sends users, points to it); `agent-reach update` moves a pip/pipx install to uv by itself; `setup` removes the old Agent Reach program (only Agent Reach itself) and the install report explains what was kept, what changed and which old channels can be added back. Install URLs always point at the latest release.
+- Upstream errors reach the agent unchanged (the original message and help); the agent tells the user which platform is temporarily unavailable, by platform name. Reach no longer replaces them with its own advice (NEED_LOGIN still gives Reach's dedicated-browser login steps).
+
+
+- **update** runs `uv tool install --force` on the latest release, reinstalls every added channel's tools at their declared versions (tested version when set, otherwise the newest version inside `floor`/`exclude`; also when Agent Reach itself has no new release), prunes tools no added channel uses, drops channels no longer in the registry, and refreshes the skill. `result.user_actions` lists in plain sentences what the user must do afterwards. Rollback: `uv tool install --force <previous release zip>`, then `agent-reach update --sync-only`. uv is the only supported installer. 1.5 and earlier installs are migrated on first `setup` / `update`; `config.yaml` keys are kept.
+- Xueqiu quotes and stock search via Tencent public quotes (no login); Xueqiu community data uses a session synced from the dedicated browser with `agent-reach login xueqiu --sync`.
+- YouTube `transcribe`; LinkedIn reuses OpenCLI search and job-detail in the shared dedicated browser.
+
+
+- The agent skill is generated from the channel list and replaced on every update.
+
+
+- RSS channel (agents read feeds themselves).
+- xhs-cli, rdt-cli, twitter-cli backends: they read browser cookies by themselves.
+- `configure --from-browser`, `twitter-cookies`, `xhs-cookies`, the old `install --channels`, the old `skill --install`, `format`, `check-update`, MCP server entry.
+- `watch` (use `doctor`, which now reports `regressed`), `doctor --live` (use `check`), `browser start` (the browser opens by itself), pipx installs.
+
+
+
+
+
+
+
+## Fork localization history
 
 ### English-language fork
 
