@@ -1,105 +1,96 @@
-# Troubleshooting common problems
+# Troubleshooting
 
-## Xueqiu: API returns 400
-
-**Symptoms:** `agent-reach doctor` displays Xueqiu ⚠️, reporting `HTTP Error 400`
-
-**Reason:** Xueqiu API requires a login cookie, which cannot be obtained through anonymous access.
-
-**Solution:** Log in to xueqiu.com in Chrome, and then run:
+Start with:
 
 ```bash
-agent-reach configure --from-browser chrome --platform xueqiu
+agent-reach doctor --text     # offline status of every channel
+agent-reach check <channel> --text   # live test of one channel
 ```
 
-Run `agent-reach doctor` again to confirm recovery ✅. Just run it again after the cookie expires.
+## Error codes
 
----
+Every failed command returns `ok: false` and an `error` with `code`, `message` and `hint`. The `hint` is usually the exact next step.
 
-## Boss Zhipin: `boss status` reports logged in, but search returns `AUTH_EXPIRED`
+| Code | Meaning | What to do |
+|---|---|---|
+| `NEED_SETUP` | a tool, key or selected browser connection is missing | run `agent-reach doctor --text` and follow the problem listed for the channel; use `agent-reach add <channel>` to install the channel's tools |
+| `NEED_LOGIN` | login is missing or expired | the user runs `agent-reach login <channel>` and logs in themselves; do not delete credentials to fix a connection or platform-verification error |
+| `UPSTREAM_BROKEN` | the upstream tool or platform failed | don't retry in a loop; try again later, inspect the upstream error and pinned dependency version, then `agent-reach check <channel>`; still broken → open an issue with the `message` |
+| `TIMEOUT` | no backend answered in time | retry later, or pass a larger `--timeout SECONDS`; on a restricted network set a proxy (below) |
+| `RATE_LIMITED` | the platform is throttling | wait for `retry_after_seconds`; do not switch accounts or backends to continue requesting |
+| `NOT_FOUND` | the content does not exist | check the link, id or username |
+| `BAD_INPUT` | wrong arguments or unknown channel/action | run `agent-reach channels` for valid actions and usage |
 
-**Symptoms:** `boss status` / `status --live` returns `logged_in: true` (even with username),
-But `boss ... search` immediately reports `{"code": "AUTH_EXPIRED", "message": "User is not logged in"}`.
-Private Chrome may be stuck on a URL with `_security_check` at the same time, looking like an anti-crawl slider.
+## Doctor statuses
 
-**Reason:** Boss has two login status stores, and the authentication channels are different:
+| Status | Meaning | What to do |
+|---|---|---|
+| `not_added` | optional channel not turned on | `agent-reach add <channel>` |
+| `needs_setup` | something is missing; `problems` says what | use `agent-reach add <channel>` or follow the specific setup step |
+| `needs_login` | the last live check failed only on login | `agent-reach login <channel>` (the user logs in) |
+| `unverified` | set up, but no live check in the last 24 hours | `agent-reach check <channel>` |
+| `search_ready` | search returned nonempty results in the last 24 hours | read and other actions need their own checks |
+| `ready` | passed the recorded live checks in the last 24 hours | inspect verified actions for the requested capability |
+| `cooldown` | a rate limit is still active | wait for `retry_after_seconds` |
+| `broken` | the last live check failed for another reason | `agent-reach update`, then `agent-reach check <channel> --text`; see `UPSTREAM_BROKEN` |
 
-| Storage | Who is using it |
-|---|---|
-| `~/.boss-agent/auth/session.enc` | `boss status` / `status --live`; low-risk operation of httpx channel (`detail` / `cities` / `job_card_httpx`). CDP search will also read it (if it cannot be read, it will directly report "not logged in"), but its cookie will never actually take effect when reusing the real Chrome context |
-| Browser cookies in `~/.boss-chrome-profile` | Credentials actually carried by high-risk operations such as search/greet in `existing-browser` strict CDP mode |
+Run `agent-reach check` first if you want fresh live results. In the `doctor` output, `regressed: true` on a channel means an action passed in the previous check and fails in the latest one.
 
-`boss status` only verifies local session.enc. There are old credentials from a few days ago stored locally, and Chrome
-When the profile itself is not logged in, it still reports `logged_in: true` - this is not proof that the login status is valid.
-At the same time, the `_security_check` page is an anti-crawling challenge, and it will appear even if you are logged in. You cannot use it to determine the login status;
-The superimposition of the two can easily misjudge "browser not logged in" as "stuck in the slider".
+## Tool versions
 
-> Do not delete either storage. Missing session.enc will cause CDP searches to fail before connecting to the browser;
-> Run `login --cdp` when you need to refresh it, don't delete files manually.
+Some channel tools install at tested versions; others use a supported range. `agent-reach doctor` shows installed versions. If a version fails, inspect the exact backend attempt before changing it.
 
-**Judgment order:**
+## Reusing existing sessions
 
-1. `AUTH_EXPIRED` is the ground truth - when it appears, the browser is not logged in, no matter what `boss status` says;
-2. `agent-reach doctor` checks the browser for a `wt2` cookie; use that result;
-3. `boss status` is for reference only; the page URL is not used as a criterion at all.
+`login CHANNEL` opens the Reach dedicated window. The user logs in there. Personal Chrome sessions are never imported. `browser setup` prepares the dedicated extension and connection; an incompatible existing Bridge is left untouched and reported.
 
-**Solution:** Confirm visually in the dedicated Chrome window and log in to zhipin.com manually, and then synchronize the login status:
+Boss requires an existing CDP BOSS page. Select it with `browser bind boss http://127.0.0.1:PORT`. Only explicit `login boss --new-browser` may open its persistent dedicated profile. After the user confirms login and stability, run `login boss --sync`. Do not clear risk locks or switch profiles to retry a platform block.
+
+LinkedIn/Bilibili preserve existing native sessions. `login CHANNEL --native` explicitly runs their own authentication if necessary. Saved state is not proof of authentication: use `check CHANNEL --search`.
+
+Search-only acceptance is shown as search_ready, not proof that every action works. PLATFORM_BLOCKED means stop and have the user check the official page. BUSY means another Reach command owns the same browser; schedule later.
+
+## Skill not picked up by an AI
+
+`agent-reach skill` shows the one real copy of the instructions (`~/.agents/skills/agent-reach/SKILL.md`) and the links made for other AIs. An AI not covered automatically: `agent-reach skill link <its skills folder>`. To keep an AI from getting it user-wide (for example when you register skills per project), run `agent-reach skill unlink <its skills folder>`; setup and update then leave that folder alone, and `skill link` undoes it. On Windows, where links may not be allowed, a copy is made instead and refreshed by `agent-reach update`.
+
+## Install, update and roll back
+
+Agent Reach is installed with uv. A copy installed another way (pip or pipx, as 1.5 was) moves itself to uv on the next `agent-reach update`; your channels, keys and logins under `~/.agent-reach/` are kept.
+
+A new version broke something? Go back to the previous release, then line the tools and skill up with it:
 
 ```bash
-boss --cdp-url http://localhost:9222 login --cdp
-agent-reach doctor    # The Boss message should report a browser login cookie (wt2)
+uv tool install --force https://github.com/jermiah/Agent-Reach/archive/refs/tags/v<previous>.zip
+agent-reach update --sync-only
 ```
 
-> The first step after launching dedicated Chrome is always to ask the user to visually confirm the login status. Do not use `boss status` instead.
+Removed default channels stay removed across updates; `agent-reach add <channel>` brings one back.
 
----
+## Proxy
 
-## Twitter/X: twitter-cli connection failed
-
-**Symptoms:** `twitter search` or other commands return errors
-
-**Reason:** twitter-cli requires `TWITTER_AUTH_TOKEN` and `TWITTER_CT0`
-Environment variables are required to access the Twitter API. `agent-reach configure twitter-cookies`
-The saved value is only used by doctor to check whether the configuration is complete; doctor does not perform upstream authentication and will not set the current
-Shell. If your network environment requires a proxy to access x.com, you also need to configure the proxy.
-
-**Solution:**
-
-### Option 1: Set environment variable proxy
+Some platforms block certain networks or regions. Save a proxy once (the address is asked for with hidden input, since it may contain a password):
 
 ```bash
-export TWITTER_AUTH_TOKEN="..."
-export TWITTER_CT0="..."
-export HTTP_PROXY="http://user:pass@host:port"
-export HTTPS_PROXY="http://user:pass@host:port"
-twitter search "test" -n 1
+agent-reach configure proxy
 ```
 
-### Option 2: Use the global proxy tool
+An agent without a terminal prompt can pipe the value in: `agent-reach configure proxy --stdin`.
 
-Let the proxy tool take over all network traffic, so that twitter-cli requests will also go through the proxy:
+It is used for every Agent Reach command. An `HTTPS_PROXY` set in your shell takes precedence.
+
+## Browser port
+
+The Agent Reach browser listens on CDP port 9222 by default. If another tool already uses 9222 (another automation browser, a debugging Chrome), browser channels fail with `Port 9222 belongs to an unmanaged browser`. Move Agent Reach to a free port instead of closing that tool:
 
 ```bash
-# macOS — ClashX / Surge turn on"enhanced mode"
-# Linux — proxychains or tun2socks
-proxychains twitter search "test" -n 1
+agent-reach configure browser-port 9333
 ```
 
-### Option 3: Instead of using twitter-cli, use Exa search instead
+The setting is kept across updates. If the Agent Reach browser is open, it closes and reopens on the new port the next time it is used.
 
-When twitter-cli is not available, you can directly use Exa to search Twitter content:
+## Still stuck
 
-```bash
-mcporter call exa.web_search_exa query="site:x.com search term" numResults=5
-```
-
-### Option 4: Check Authentication
-
-```bash
-twitter check
-```
-
-> If "Missing credentials" is returned, it needs to be set in the process environment where the command is run.
-> `TWITTER_AUTH_TOKEN` and `TWITTER_CT0`.
->
-> **Fallback:** If you have bird CLI (`npm install -g @steipete/bird`) installed, it will also work fine. Agent Reach automatically detects installed tools.
+- `agent-reach update` and try again.
+- Remove and re-add a channel: `agent-reach remove <channel>` then `agent-reach add <channel>` (remove also clears its login, its site cookies in the Agent Reach browser, and its private tools nobody else uses).
+- Open an issue at https://github.com/jermiah/Agent-Reach/issues with the output of `agent-reach doctor --text` (it starts with the version) and `agent-reach check <channel> --text`. Remove any personal data first.

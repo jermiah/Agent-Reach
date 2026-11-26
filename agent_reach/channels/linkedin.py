@@ -1,69 +1,53 @@
-# -*- coding: utf-8 -*-
-"""LinkedIn — check if mcp-server-linkedin is configured."""
+"""LinkedIn job actions through upstream OpenCLI and the shared Reach browser."""
+import re
+from urllib.parse import urlsplit
 
-import shutil
+from agent_reach.runtime.result import BAD_INPUT, ReachError
+from agent_reach.utils.url import host_matches
 
-from .base import Channel
-from .mcporter import McporterConfigError, inspect_mcporter_config
-
-_LINKEDIN_SERVER_NAMES = {
-    "linkedin",
-    "linkedin-scraper",
-    "linkedin-scraper-mcp",
-    "mcp-server-linkedin",
-}
-_LOGIN_COMMAND = "uvx mcp-server-linkedin@latest --login"
-_UV_INSTALL_URL = "https://docs.astral.sh/uv/getting-started/installation/"
-_CONFIG_COMMAND = (
-    "mcporter config add linkedin --command uvx "
-    "--arg mcp-server-linkedin@latest --env UV_HTTP_TIMEOUT=300 --scope home"
-)
+from ._opencli_site import OpenCLISiteChannel
+from .base import Action, Param
 
 
-class LinkedInChannel(Channel):
-    name = "linkedin"
-    description = "LinkedIn professional networking"
-    backends = ["mcp-server-linkedin", "Jina Reader"]
-    tier = 2
+class LinkedInChannel(OpenCLISiteChannel):
+    name = site = "linkedin"
+    description = "LinkedIn job search and details"
+    domains = ("linkedin.com",)
+    login_hint = "linkedin.com"
+    login_url = "https://www.linkedin.com/login"
+    login_cookie = "li_at"
+    level = "optional"
+    actions = (
+        Action("jobs", "Search LinkedIn jobs", (
+            Param("query", "job keywords"), Param("location", "city or country", required=False),
+            Param("limit", "max results", required=False, type=int, default=5)),
+            (("opencli", "_jobs"),), live_test={"query": "python", "limit": 2}, timeout=120,
+            public_web=("linkedin.com/jobs/view/",)),
+        Action("read", "Read a LinkedIn job description", (Param("target", "full job URL"),),
+               (("opencli", "_read"),), timeout=90, public_web=("linkedin.com/jobs/view/",)),
+    )
 
-    def can_handle(self, url: str) -> bool:
-        from agent_reach.utils.url import host_matches
+    def _jobs(self, *, query, location, limit, timeout):
+        args = ["search", query, "--limit", str(limit)]
+        if location:
+            args += ["--location", location]
+        return self._opencli(args, timeout)[:limit]
 
-        return host_matches(url, "linkedin.com")
+    def _read(self, *, target, timeout):
+        if not host_matches(str(target), "linkedin.com"):
+            raise ReachError(BAD_INPUT, "Expected a linkedin.com job URL")
+        return self._opencli(["job-detail", self._job_url(str(target))], timeout)[:1]
 
-    def check(self, config=None):
-        self.active_backend = None
-        if not shutil.which("mcporter"):
-            return "off", (
-                "Basic content can be read through Jina Reader. Full functionality requires: \n"
-                f"  Install uv/uvx first: {_UV_INSTALL_URL}\n"
-                f"  {_LOGIN_COMMAND}\n"
-                f"  {_CONFIG_COMMAND}\n"
-                "  See https://github.com/stickerdaniel/linkedin-mcp-server for details"
-            )
-        try:
-            inspection = inspect_mcporter_config()
-        except McporterConfigError as exc:
-            return "error", f"mcporter configuration check failed: {exc}"
-        if inspection.server_names & _LINKEDIN_SERVER_NAMES:
-            if not shutil.which("uvx"):
-                return "warn", (
-                    "LinkedIn MCP is configured in mcporter, but uvx is not installed. "
-                    "The service cannot start. Install: \n"
-                    f"  {_UV_INSTALL_URL}"
-                )
-            return "warn", (
-                "LinkedIn MCP is configured in mcporter, but Doctor has not started the local "
-                "service to verify connectivity. Configuration alone does not prove availability."
-            )
-        if inspection.imports_unchecked:
-            return "warn", (
-                "LinkedIn MCP is absent from local mcporter configuration. Editor imports are enabled, "
-                "but Doctor does not expand them to avoid reading additional credentials; access is unverified."
-            )
-        return "off", (
-            "mcporter is installed but LinkedIn MCP is not configured. Run: \n"
-            f"  Install uv/uvx first: {_UV_INSTALL_URL}\n"
-            f"  {_LOGIN_COMMAND}\n"
-            f"  {_CONFIG_COMMAND}"
-        )
+    @staticmethod
+    def _job_url(target: str) -> str:
+        if not host_matches(target, "linkedin.com"):
+            raise ReachError(BAD_INPUT, "Expected a linkedin.com job URL")
+        match = re.fullmatch(r"/jobs/view/(?:[^/]+-)?([0-9]+)/?", urlsplit(target).path)
+        if not match:
+            raise ReachError(BAD_INPUT, "Expected a LinkedIn /jobs/view/<job-id> URL")
+        # Public indexes use regional hosts and title slugs; upstream accepts IDs.
+        return "https://www.linkedin.com/jobs/view/" + match.group(1)
+
+    def validate_params(self, action, params):
+        if action == "read":
+            params["target"] = self._job_url(str(params["target"]))

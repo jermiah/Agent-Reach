@@ -1,142 +1,91 @@
 # -*- coding: utf-8 -*-
-"""Twitter/X — check if twitter-cli or bird CLI is available."""
+"""Twitter/X — OpenCLI in the Agent Reach browser (experimental)."""
 
-import os
-import shutil
-
+from agent_reach.backends.opencli import opencli_call, opencli_items
+from agent_reach.runtime.result import UPSTREAM_BROKEN, ReachError
 from agent_reach.utils.url import host_matches
 
-from .base import Channel
+from .base import Action, Channel, Param
+
+_TWITTER_LOGIN_HINT = (
+    "Ask the user to log in to x.com in the Agent Reach dedicated browser. Never log in on their behalf."
+)
 
 
-def twitter_cli_child_env(config=None) -> dict[str, str]:
-    """Return saved credentials missing from the current process environment.
-
-    The returned mapping is meant for a single child process.  Existing shell
-    variables remain authoritative and ``os.environ`` is never mutated.
-    """
-    if config is None:
-        return {}
-
-    child_env = {}
-    for env_name, config_key in (
-        ("TWITTER_AUTH_TOKEN", "twitter_auth_token"),
-        ("TWITTER_CT0", "twitter_ct0"),
-    ):
-        if env_name in os.environ:
-            continue
-        value = config.get(config_key)
-        if value:
-            child_env[env_name] = str(value)
-    return child_env
+def _x(args, timeout: float) -> list:
+    items = opencli_items(opencli_call("twitter", list(args), timeout=timeout, login_hint=_TWITTER_LOGIN_HINT))
+    if not items:
+        raise ReachError(UPSTREAM_BROKEN, "OpenCLI finished but returned no items")
+    return items
 
 
 class TwitterChannel(Channel):
     name = "twitter"
     description = "Twitter/X Tweets"
-    backends = ["twitter-cli", "OpenCLI", "bird CLI (legacy)"]
-    tier = 1
+
+    # twitter-cli is not used here: even with explicit credentials it re-reads
+    # browser cookies whenever verification fails.
+    level = "experimental"
+    login_url = "https://x.com/i/flow/login"
+    tools = ("opencli",)
+    prereqs = ("node", "chrome")
+
+    def setup_problems(self):
+        from agent_reach.runtime.browser_binding import setup_problems
+
+        return setup_problems(self.name)
+
+    actions = (
+        Action(
+            "search",
+            "Search tweets",
+            (
+                Param("query", "what to search for"),
+                Param("limit", "max results", required=False, type=int, default=5),
+            ),
+            (("opencli", "_opencli_search"),),
+            live_test={"query": "openai", "limit": 2},
+            public_web=("x.com/", "twitter.com/"),
+        ),
+        Action(
+            "profile",
+            "A user's profile",
+            (Param("username", "handle without @"),),
+            (("opencli", "_opencli_profile"),),
+            live_test={"username": "OpenAI"},
+        ),
+        Action(
+            "tweets",
+            "A user's recent tweets",
+            (
+                Param("username", "handle without @"),
+                Param("limit", "max tweets", required=False, type=int, default=5),
+            ),
+            (("opencli", "_opencli_tweets"),),
+        ),
+        Action(
+            "thread",
+            "A tweet with its replies",
+            (Param("target", "tweet id or link"),),
+            (("opencli", "_opencli_thread"),),
+        ),
+    )
 
     def can_handle(self, url: str) -> bool:
         return host_matches(url, "x.com", "twitter.com")
 
-    def check(self, config=None):
-        """Probe candidates in order; first fully-usable backend wins.
+    # ── unified entry backends ──
 
-        Collect all candidates, then prefer the first ok result over any warn result.
-        Otherwise an installed but unauthenticated twitter-cli would hide a
-        fully working OpenCLI backend later in the list.
-        """
-        self.active_backend = None
-        findings = []
+    def _opencli_search(self, *, query: str, limit: int, timeout: float) -> list:
+        return _x(["search", query, "--limit", str(limit)], timeout)[:limit]
 
-        for backend in self.ordered_backends(config):
-            if backend == "twitter-cli":
-                result = self._check_twitter_cli(config)
-            elif backend == "OpenCLI":
-                result = self._check_opencli()
-            elif backend == "bird CLI (legacy)":
-                result = self._check_bird()
-            else:
-                continue
 
-            if result is None:
-                continue  # Not installed - not a candidate
-            findings.append((backend, *result))
+    def _opencli_profile(self, *, username: str, timeout: float) -> list:
+        return _x(["profile", username.lstrip("@")], timeout)[:1]
 
-        for wanted in ("ok", "warn"):
-            for backend, status, message in findings:
-                if status == wanted:
-                    self.active_backend = backend if status == "ok" else None
-                    return status, message
+    def _opencli_tweets(self, *, username: str, limit: int, timeout: float) -> list:
+        return _x(["tweets", username.lstrip("@"), "--limit", str(limit)], timeout)[:limit]
 
-        if findings:  # Only broken/timeout candidates remain
-            return "error", "\n".join(m for _, _, m in findings)
-
-        return "warn", (
-            "Twitter CLI is not installed. Installation method: \n"
-            "  pipx install twitter-cli\n"
-            "Or: \n"
-            "  uv tool install twitter-cli"
-        )
-
-    def _check_twitter_cli(self, config=None):
-        """Inspect explicit credentials without starting twitter-cli.
-
-        Upstream ``twitter status`` automatically reads browser cookies when
-        credentials are missing *or invalid*. Doctor cannot disable that
-        fallback, so executing it would violate the Cookie-Editor-only policy.
-        """
-        if not shutil.which("twitter"):
-            return None
-
-        child_env = twitter_cli_child_env(config)
-        auth_token = os.environ.get("TWITTER_AUTH_TOKEN") or child_env.get(
-            "TWITTER_AUTH_TOKEN"
-        )
-        ct0 = os.environ.get("TWITTER_CT0") or child_env.get("TWITTER_CT0")
-        if auth_token and ct0:
-            return "warn", (
-                "twitter-cli is installed and Cookie-Editor credentials are configured; "
-                "Doctor will not execute `twitter status`: if verification fails, upstream would "
-                "automatically read browser cookies. Verify manually only with your explicit consent."
-            )
-        return "warn", (
-            "twitter-cli is installed but explicit credentials are incomplete. Export cookies "
-            "from x.com with Cookie-Editor, then run: \n"
-            "  agent-reach configure twitter-cookies\n"
-            "Doctor does not automatically read browser cookies."
-        )
-
-    def _check_opencli(self):
-        """OpenCLI candidate. None = not installed."""
-        from agent_reach.backends import opencli_status
-
-        st = opencli_status()
-        if not st.installed:
-            return None
-        if st.broken:
-            return "error", st.hint
-        if st.ready:
-            return "warn", (
-                "OpenCLI bridge is connected, but Twitter/X login status and actual commands are not verified live; "
-                "Doctor does not execute platform commands and is therefore not currently marked as available."
-            )
-        return "warn", st.hint
-
-    def _check_bird(self):
-        """Inspect legacy bird credentials without launching browser fallback."""
-        for cmd in ("bird", "birdx"):
-            if not shutil.which(cmd):
-                continue
-            if os.environ.get("AUTH_TOKEN") and os.environ.get("CT0"):
-                return (
-                    "warn",
-                    f"{cmd} is installed with explicit environment credentials. To avoid the upstream "
-                    "browser-cookie fallback, Doctor does not execute `check`; credentials are not verified live.",
-                )
-            return "warn", (
-                f"{cmd} installed but no explicit AUTH_TOKEN/CT0 detected; "
-                "Only use manually exported credentials with Cookie-Editor."
-            )
-        return None
+    def _opencli_thread(self, *, target: str, timeout: float) -> list:
+        tweet_id = str(target).rstrip("/").split("/")[-1].split("?")[0]
+        return _x(["thread", tweet_id], timeout)

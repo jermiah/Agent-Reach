@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Dedicated tests for the ``xueqiu`` (Xueqiu) channel.
+"""Dedicated tests for the ``xueqiu`` (雪球) channel.
 
 Xueqiu wraps several public JSON endpoints and does real shaping of the
 responses — normalising quotes, unwrapping the JSON-in-JSON hot-post
@@ -9,16 +9,35 @@ offline. Follow-up to #331 — extends dedicated channel coverage after rss
 (#360), github (#361), web (#363) and reddit (#364).
 """
 
-import json
-import sys
-import types
-from unittest.mock import patch
-from urllib.parse import parse_qs, urlsplit
+
 
 import pytest
 
-from agent_reach.channels import xueqiu as xq
 from agent_reach.channels.xueqiu import XueqiuChannel, _strip_html
+from agent_reach.runtime.dispatch import run_action
+
+
+def test_quote_routes_bare_920_symbol_to_beijing_exchange(monkeypatch):
+    requests = []
+
+    def fake_http_request(url, timeout):
+        requests.append(url)
+        if url != "https://qt.gtimg.cn/q=bj920008":
+            return b'v_sh920008="";'
+        fields = ["1", "成电光信", "920008", "12.34", "12.00", "12.10"]
+        fields += [""] * 24
+        fields += ["20261106150000", "0.34", "2.83", "12.50", "11.90"]
+        return ("v_bj920008=\"" + "~".join(fields) + "\";").encode("gbk")
+
+    monkeypatch.setattr("agent_reach.channels.xueqiu.http_request", fake_http_request)
+
+    out = run_action(XueqiuChannel(), "quote", {"symbol": "920008"}, only_backend="tencent")
+
+    assert out["ok"] is True
+    assert requests == ["https://qt.gtimg.cn/q=bj920008"]
+    assert out["items"][0]["title"] == "成电光信 (BJ920008)"
+    assert out["items"][0]["raw"]["symbol"] == "BJ920008"
+
 
 # --- can_handle ---
 
@@ -40,243 +59,50 @@ def test_strip_html_removes_tags_and_decodes_entities():
 
 # --- check(): single public endpoint, items present/empty/error ---
 
-def test_check_validates_detail_quote_endpoint():
-    ch = XueqiuChannel()
-    requested = []
-    with patch.object(
-        xq,
-        "_get_json",
-        side_effect=lambda url, config=None: requested.append(url)
-        or {"data": {"quote": {"symbol": "SH601138", "pe_ttm": 38.1}}},
-    ):
-        status, message = ch.check()
-
-    assert status == "ok"
-    assert ch.active_backend == ch.backends[0]
-    assert requested == [
-        "https://stock.xueqiu.com/v5/stock/quote.json"
-        "?symbol=SH601138&extend=detail"
-    ]
 
 
-def test_check_warn_when_quote_empty():
-    ch = XueqiuChannel()
-    with patch.object(xq, "_get_json", return_value={"data": {"quote": {}}}):
-        status, message = ch.check()
-    assert status == "warn"
-    assert "is empty" in message
-    assert ch.active_backend is None
 
 
-def test_check_warn_on_exception():
-    import urllib.error
-    ch = XueqiuChannel()
-    with patch.object(xq, "_get_json", side_effect=urllib.error.URLError("refused")):
-        status, message = ch.check()
-    assert status == "warn"
-    assert "connection failed" in message
-    assert ch.active_backend is None
 
 
-def test_check_never_reads_browser_cookie_store_implicitly(monkeypatch):
-    browser_reads = []
-    fake_rookiepy = types.SimpleNamespace(
-        chrome=lambda *_args, **_kwargs: browser_reads.append("rookiepy") or []
-    )
-    monkeypatch.setitem(sys.modules, "rookiepy", fake_rookiepy)
-    monkeypatch.setattr(xq, "_cookies_initialized", False)
-    monkeypatch.setattr(
-        xq,
-        "_load_cookies_from_config",
-        lambda config=None: False,
-    )
-
-    class FakeResponse:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def read(self):
-            return b'{"data":{"quote":{"symbol":"SH601138","pe_ttm":38.1}}}'
-
-    monkeypatch.setattr(xq._opener, "open", lambda *_args, **_kwargs: FakeResponse())
-
-    status, _message = XueqiuChannel().check()
-
-    assert status == "ok"
-    assert browser_reads == []
 
 
 # --- get_stock_quote: field mapping + missing-data fallback ---
 
-def test_get_stock_quote_maps_fields():
-    ch = XueqiuChannel()
-    payload = {"data": {"quote": {
-        "symbol": "SH600519", "name": "\u8d35\u5dde\u8305\u53f0", "current": 1700.5,
-        "percent": 1.23, "volume": 1234, "pe_ttm": 30.1,
-        "pe_forecast": 27.4, "pb": 8.2, "eps": 59.0,
-    }}}
-    requested = []
-    with patch.object(
-        xq, "_get_json", side_effect=lambda url: requested.append(url) or payload
-    ):
-        q = ch.get_stock_quote("SH600519")
-
-    assert requested == [
-        "https://stock.xueqiu.com/v5/stock/quote.json"
-        "?symbol=SH600519&extend=detail"
-    ]
-    assert q["symbol"] == "SH600519"
-    assert q["name"] == "\u8d35\u5dde\u8305\u53f0"
-    assert q["current"] == 1700.5
-    assert q["volume"] == 1234
-    assert q["pe_ttm"] == 30.1
-    assert q["pe_forecast"] == 27.4
-    assert q["pb"] == 8.2
-    assert q["eps"] == 59.0
 
 
-def test_get_stock_quote_falls_back_when_no_items():
-    ch = XueqiuChannel()
-    with patch.object(xq, "_get_json", return_value={"data": {"items": []}}):
-        q = ch.get_stock_quote("AAPL")
-    assert q["symbol"] == "AAPL"  # echoes the requested symbol
-    assert q["name"] == ""
-    assert q["current"] is None
 
 
 # --- search_stock: mapping + limit ---
 
-def test_search_stock_maps_and_respects_limit():
-    ch = XueqiuChannel()
-    stocks = [
-        {"code": "SH600519", "name": "\u8d35\u5dde\u8305\u53f0", "exchange": "SH"},
-        {"code": "SZ000858", "name": "\u4e94\u7cae\u6db2", "exchange": "SZ"},
-        {"code": "SH601318", "name": "\u4e2d\u56fd\u5e73\u5b89", "exchange": "SH"},
-    ]
-    with patch.object(xq, "_get_json", return_value={"stocks": stocks}):
-        results = ch.search_stock("\u9152", limit=2)
-    assert len(results) == 2
-    assert results[0] == {"symbol": "SH600519", "name": "\u8d35\u5dde\u8305\u53f0", "exchange": "SH"}
 
 
-def test_search_stock_handles_missing_stocks_key():
-    ch = XueqiuChannel()
-    with patch.object(xq, "_get_json", return_value={}):
-        assert ch.search_stock("\u65e0") == []
 
 
 # --- get_hot_posts: JSON-in-JSON unwrap, html strip, url build, bad data ---
 
-def test_get_hot_posts_unwraps_and_shapes():
-    ch = XueqiuChannel()
-    inner = {
-        "id": 42, "title": "\u8305\u53f0\u5927\u6da8",
-        "text": "<p>\u4eca\u5929<b>\u5927\u6da8</b>&nbsp;\u4e86</p>",
-        "user": {"screen_name": "\u97ed\u83dc\u738b"},
-        "like_count": 99, "target": "/SH600519/123",
-    }
-    payload = {"list": [{"data": json.dumps(inner, ensure_ascii=False)}]}
-    with patch.object(xq, "_get_json", return_value=payload):
-        posts = ch.get_hot_posts(limit=5)
-    assert len(posts) == 1
-    p = posts[0]
-    assert p["id"] == 42
-    assert p["title"] == "\u8305\u53f0\u5927\u6da8"
-    assert p["text"] == "\u4eca\u5929\u5927\u6da8 \u4e86"          # html stripped, entity decoded
-    assert p["author"] == "\u97ed\u83dc\u738b"
-    assert p["likes"] == 99
-    assert p["url"] == "https://xueqiu.com/SH600519/123"
 
 
-def test_get_hot_posts_truncates_text_to_200_chars():
-    ch = XueqiuChannel()
-    inner = {"text": "x" * 500, "target": ""}
-    payload = {"list": [{"data": json.dumps(inner)}]}
-    with patch.object(xq, "_get_json", return_value=payload):
-        posts = ch.get_hot_posts()
-    assert len(posts[0]["text"]) == 200
-    assert posts[0]["url"] == ""  # no target -> no url
 
 
-def test_get_hot_posts_tolerates_bad_data_field():
-    ch = XueqiuChannel()
-    # one item with non-string data, one with invalid JSON -> both -> defaults
-    payload = {"list": [{"data": 123}, {"data": "{not json"}]}
-    with patch.object(xq, "_get_json", return_value=payload):
-        posts = ch.get_hot_posts()
-    assert len(posts) == 2
-    for p in posts:
-        assert p["id"] == 0
-        assert p["author"] == ""
-        assert p["url"] == ""
 
 
-def test_get_hot_posts_requests_the_requested_count():
-    ch = XueqiuChannel()
-    captured = {}
-
-    def fake_get_json(url):
-        captured["url"] = url
-        return {"list": []}
-
-    with patch.object(xq, "_get_json", side_effect=fake_get_json):
-        ch.get_hot_posts(limit=50)
-
-    assert parse_qs(urlsplit(captured["url"]).query)["count"] == ["50"]
 
 
-def test_get_hot_posts_clamps_count_to_documented_maximum():
-    ch = XueqiuChannel()
-    captured = {}
-    payload = {"list": [{"data": "{}"}] * 60}
-
-    def fake_get_json(url):
-        captured["url"] = url
-        return payload
-
-    with patch.object(xq, "_get_json", side_effect=fake_get_json):
-        posts = ch.get_hot_posts(limit=500)
-
-    assert parse_qs(urlsplit(captured["url"]).query)["count"] == ["50"]
-    assert len(posts) == 50
 
 
-def test_get_hot_posts_zero_limit_skips_network():
-    ch = XueqiuChannel()
-    with patch.object(
-        xq,
-        "_get_json",
-        side_effect=AssertionError("zero limit must not make a request"),
-    ):
-        assert ch.get_hot_posts(limit=0) == []
 
 
-def test_get_hot_posts_rejects_negative_limit():
-    ch = XueqiuChannel()
-    with pytest.raises(ValueError, match="non-negative"):
-        ch.get_hot_posts(limit=-1)
 
 
 # --- get_hot_stocks: ranking + code/symbol fallback ---
 
-def test_get_hot_stocks_ranks_and_falls_back_to_symbol():
-    ch = XueqiuChannel()
-    items = [
-        {"code": "SH600519", "name": "\u8d35\u5dde\u8305\u53f0", "current": 1700, "percent": 1.2},
-        {"symbol": "SZ000858", "name": "\u4e94\u7cae\u6db2", "current": 150, "percent": -0.5},
-    ]
-    with patch.object(xq, "_get_json", return_value={"data": {"items": items}}):
-        results = ch.get_hot_stocks(limit=10)
-    assert results[0]["rank"] == 1
-    assert results[0]["symbol"] == "SH600519"
-    assert results[1]["rank"] == 2
-    assert results[1]["symbol"] == "SZ000858"  # used `symbol` since `code` absent
 
-
-def test_get_hot_stocks_empty_when_no_items():
-    ch = XueqiuChannel()
-    with patch.object(xq, "_get_json", return_value={"data": {}}):
-        assert ch.get_hot_stocks() == []
+@pytest.mark.parametrize("text,expected", [
+    ("<p>&quot;A&quot; &#39;B&#39;</p>", "\"A\" 'B'"),
+    ("<p>&#20013;&#x6587; &mdash; &#x1F680;</p>", "中文 — 🚀"),
+    ("&amp;lt;b&amp;gt;literal&amp;lt;/b&amp;gt;", "&lt;b&gt;literal&lt;/b&gt;"),
+    ("a&#160;b&#xA0;c", "a b c"),
+])
+def test_strip_html_decodes_named_and_numeric_entities_once(text, expected):
+    assert _strip_html(text) == expected
